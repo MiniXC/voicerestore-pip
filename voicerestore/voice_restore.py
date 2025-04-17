@@ -1,6 +1,6 @@
 #
 # Code is adapted from https://github.com/lucidrains/e2-tts-pytorch
-# 
+#
 
 """
 ein notation:
@@ -27,14 +27,21 @@ from x_transformers import Attention, FeedForward, RMSNorm, AdaptiveRMSNorm
 from x_transformers.x_transformers import RotaryEmbedding
 from gateloop_transformer import SimpleGateLoopLayer
 
-from tensor_typing import Float
+from .tensor_typing import Float
+
 
 class Identity(Module):
     def forward(self, x, **kwargs):
         return x
 
+
 class AdaLNZero(Module):
-    def __init__(self, dim: int, dim_condition: Optional[int] = None, init_bias_value: float = -2.):
+    def __init__(
+        self,
+        dim: int,
+        dim_condition: Optional[int] = None,
+        init_bias_value: float = -2.0,
+    ):
         super().__init__()
         dim_condition = dim_condition or dim
         self.to_gamma = nn.Linear(dim_condition, dim)
@@ -44,18 +51,22 @@ class AdaLNZero(Module):
     def forward(self, x: torch.Tensor, *, condition: torch.Tensor) -> torch.Tensor:
         # condition shape: (b, d) or (b, 1, d)
         if condition.ndim == 2:
-            condition = rearrange(condition, 'b d -> b 1 d')
+            condition = rearrange(condition, "b d -> b 1 d")
         gamma = self.to_gamma(condition).sigmoid()
         return x * gamma
+
 
 def exists(v: Any) -> bool:
     return v is not None
 
+
 def default(v: Any, d: Any) -> Any:
     return v if exists(v) else d
 
+
 def divisible_by(num: int, den: int) -> bool:
     return (num % den) == 0
+
 
 class Transformer(Module):
     def __init__(
@@ -64,7 +75,7 @@ class Transformer(Module):
         dim: int,
         depth: int = 8,
         cond_on_time: bool = True,
-        skip_connect_type: str = 'concat',
+        skip_connect_type: str = "concat",
         abs_pos_emb: bool = True,
         max_seq_len: int = 8192,
         heads: int = 8,
@@ -72,17 +83,19 @@ class Transformer(Module):
         num_gateloop_layers: int = 1,
         dropout: float = 0.1,
         num_registers: int = 32,
-        attn_kwargs: Dict[str, Any] = dict(gate_value_heads=True, softclamp_logits=True),
-        ff_kwargs: Dict[str, Any] = dict()
+        attn_kwargs: Dict[str, Any] = dict(
+            gate_value_heads=True, softclamp_logits=True
+        ),
+        ff_kwargs: Dict[str, Any] = dict(),
     ):
         super().__init__()
-        assert divisible_by(depth, 2), 'depth needs to be even'
+        assert divisible_by(depth, 2), "depth needs to be even"
 
         self.max_seq_len = max_seq_len
         self.abs_pos_emb = nn.Embedding(max_seq_len, dim) if abs_pos_emb else None
         self.dim = dim
         self.skip_connect_type = skip_connect_type
-        needs_skip_proj = skip_connect_type == 'concat'
+        needs_skip_proj = skip_connect_type == "concat"
         self.depth = depth
         self.layers = ModuleList([])
 
@@ -95,41 +108,51 @@ class Transformer(Module):
         rmsnorm_klass = AdaptiveRMSNorm if cond_on_time else RMSNorm
         postbranch_klass = partial(AdaLNZero, dim=dim) if cond_on_time else Identity
 
-        self.time_cond_mlp = Sequential(
-            Rearrange('... -> ... 1'),
-            Linear(1, dim),
-            nn.SiLU()
-        ) if cond_on_time else nn.Identity()
+        self.time_cond_mlp = (
+            Sequential(Rearrange("... -> ... 1"), Linear(1, dim), nn.SiLU())
+            if cond_on_time
+            else nn.Identity()
+        )
 
         for ind in range(depth):
             is_later_half = ind >= (depth // 2)
             gateloop = SimpleGateLoopLayer(dim=dim)
             attn_norm = rmsnorm_klass(dim)
-            attn = Attention(dim=dim, heads=heads, dim_head=dim_head, dropout=dropout, **attn_kwargs)
+            attn = Attention(
+                dim=dim, heads=heads, dim_head=dim_head, dropout=dropout, **attn_kwargs
+            )
             attn_adaln_zero = postbranch_klass()
             ff_norm = rmsnorm_klass(dim)
             ff = FeedForward(dim=dim, glu=True, dropout=dropout, **ff_kwargs)
             ff_adaln_zero = postbranch_klass()
-            skip_proj = Linear(dim * 2, dim, bias=False) if needs_skip_proj and is_later_half else None
+            skip_proj = (
+                Linear(dim * 2, dim, bias=False)
+                if needs_skip_proj and is_later_half
+                else None
+            )
 
-            self.layers.append(ModuleList([
-                gateloop, 
-                skip_proj, 
-                attn_norm, 
-                attn, 
-                attn_adaln_zero,
-                ff_norm, 
-                ff, 
-                ff_adaln_zero
-            ]))
+            self.layers.append(
+                ModuleList(
+                    [
+                        gateloop,
+                        skip_proj,
+                        attn_norm,
+                        attn,
+                        attn_adaln_zero,
+                        ff_norm,
+                        ff,
+                        ff_adaln_zero,
+                    ]
+                )
+            )
 
         self.final_norm = RMSNorm(dim)
 
     def forward(
         self,
-        x: Float['b n d'],
-        times: Optional[Float['b'] | Float['']] = None,
-        mask: Optional[torch.Tensor] = None
+        x: Float["b n d"],
+        times: Optional[Float["b"] | Float[""]] = None,
+        mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         Args:
@@ -138,9 +161,9 @@ class Transformer(Module):
             mask: (b, n) boolean or 0/1 mask for attention
         """
         b, n, device = x.shape[0], x.shape[1], x.device
-        assert not (exists(times) ^ self.cond_on_time), (
-            "`times` must be passed in if `cond_on_time` is set to `True`, and vice versa."
-        )
+        assert not (
+            exists(times) ^ self.cond_on_time
+        ), "`times` must be passed in if `cond_on_time` is set to `True`, and vice versa."
 
         norm_kwargs = {}
 
@@ -153,13 +176,13 @@ class Transformer(Module):
         # Time conditioning
         if exists(times):
             if times.ndim == 0:
-                times = repeat(times, ' -> b', b=b)
+                times = repeat(times, " -> b", b=b)
             times = self.time_cond_mlp(times)  # (b, d) or (b, 1, d)
-            norm_kwargs['condition'] = times
+            norm_kwargs["condition"] = times
 
         # Concat registers to the sequence
-        registers = repeat(self.registers, 'r d -> b r d', b=b)
-        x, registers_packed_shape = pack((registers, x), 'b * d')
+        registers = repeat(self.registers, "r d -> b r d", b=b)
+        x, registers_packed_shape = pack((registers, x), "b * d")
 
         # Build the rotary embeddings for this sequence length
         rotary_pos_emb = self.rotary_emb.forward_from_seq_len(x.shape[-2])
@@ -176,18 +199,18 @@ class Transformer(Module):
         skips = []
 
         for ind, (
-            gateloop, 
-            maybe_skip_proj, 
-            attn_norm, 
-            attn, 
+            gateloop,
+            maybe_skip_proj,
+            attn_norm,
+            attn,
             maybe_attn_adaln_zero,
-            ff_norm, 
-            ff, 
-            maybe_ff_adaln_zero
+            ff_norm,
+            ff,
+            maybe_ff_adaln_zero,
         ) in enumerate(self.layers):
 
             layer_idx = ind + 1
-            is_first_half = (layer_idx <= (self.depth // 2))
+            is_first_half = layer_idx <= (self.depth // 2)
 
             # If in the first half, push x onto skip stack
             if is_first_half:
@@ -195,7 +218,7 @@ class Transformer(Module):
             else:
                 # Retrieve matching skip
                 skip = skips.pop()
-                if self.skip_connect_type == 'concat':
+                if self.skip_connect_type == "concat":
                     x = torch.cat((x, skip), dim=-1)
                     x = maybe_skip_proj(x)
 
@@ -206,7 +229,7 @@ class Transformer(Module):
             attn_out = attn(
                 attn_norm(x, **norm_kwargs),
                 rotary_pos_emb=rotary_pos_emb,
-                mask=mask  # pass mask here
+                mask=mask,  # pass mask here
             )
             x = x + maybe_attn_adaln_zero(attn_out, **norm_kwargs)
 
@@ -217,9 +240,10 @@ class Transformer(Module):
         assert len(skips) == 0, "Skip-connection stack not empty at the end!"
 
         # Unpack back
-        _, x = unpack(x, registers_packed_shape, 'b * d')
+        _, x = unpack(x, registers_packed_shape, "b * d")
 
         return self.final_norm(x)
+
 
 class VoiceRestore(nn.Module):
     def __init__(
@@ -237,7 +261,11 @@ class VoiceRestore(nn.Module):
         self.transformer = Transformer(**transformer, cond_on_time=True)
 
         # Default ODE integration settings
-        self.odeint_kwargs = odeint_kwargs or {'atol': 1e-5, 'rtol': 1e-5, 'method': 'midpoint'}
+        self.odeint_kwargs = odeint_kwargs or {
+            "atol": 1e-5,
+            "rtol": 1e-5,
+            "method": "midpoint",
+        }
 
         self.proj_in = nn.Linear(num_channels, self.transformer.dim)
         self.cond_proj = nn.Linear(num_channels, self.transformer.dim)
@@ -248,10 +276,10 @@ class VoiceRestore(nn.Module):
         x: torch.Tensor,
         times: torch.Tensor,
         cond: Optional[torch.Tensor] = None,
-        mask: Optional[torch.Tensor] = None
+        mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
-        Projects input x, optionally adds condition, feeds through Transformer, 
+        Projects input x, optionally adds condition, feeds through Transformer,
         and returns final prediction in dimension of num_channels.
         """
         x = self.proj_in(x)  # (b, n, dim)
@@ -268,7 +296,7 @@ class VoiceRestore(nn.Module):
         times: torch.Tensor,
         cond: Optional[torch.Tensor] = None,
         mask: Optional[torch.Tensor] = None,
-        cfg_strength: float = 0.5
+        cfg_strength: float = 0.5,
     ):
         """
         Classifier-free guidance variant of the transformer forward.
@@ -281,7 +309,9 @@ class VoiceRestore(nn.Module):
             return pred if mask is None else pred * mask.unsqueeze(-1)
 
         # null (no condition) pass
-        null_pred = self.transformer_with_pred_head(x, times=times, cond=None, mask=mask)
+        null_pred = self.transformer_with_pred_head(
+            x, times=times, cond=None, mask=mask
+        )
 
         guided = pred + (pred - null_pred) * cfg_strength
         return guided if mask is None else guided * mask.unsqueeze(-1)
@@ -292,11 +322,11 @@ class VoiceRestore(nn.Module):
         processed: torch.Tensor,
         steps: int = 32,
         cfg_strength: float = 0.5,
-        mask: Optional[torch.Tensor] = None
+        mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
-        Example sampling routine using an ODE solver.  For many text/audio models, 
-        you'll use something else, but this shows how you might incorporate the 
+        Example sampling routine using an ODE solver.  For many text/audio models,
+        you'll use something else, but this shows how you might incorporate the
         same forward pass + mask into an ODE integration.
         """
         self.eval()
@@ -305,11 +335,7 @@ class VoiceRestore(nn.Module):
 
         def ode_fn(t: torch.Tensor, x: torch.Tensor):
             return self.cfg_transformer_with_pred_head(
-                x,
-                times=t,
-                cond=processed,
-                mask=mask,
-                cfg_strength=cfg_strength
+                x, times=t, cond=processed, mask=mask, cfg_strength=cfg_strength
             )
 
         # Starting from noise

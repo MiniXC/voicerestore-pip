@@ -1,6 +1,7 @@
 *.pt
 *.pth
 test_output.wav
+model_cache
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
